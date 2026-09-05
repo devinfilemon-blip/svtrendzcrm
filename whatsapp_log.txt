@@ -1,0 +1,17 @@
+{"message":"Cannot GET /api/sendMessage?token=cmbp3ruyw2gdzctwdvxsmj4mz&phone=918446191460&message=Welcome+to+Enhance%21%0A%0AYour+account+has+been+created+successfully.%0AMobile+No%3A+8446191460%0APassword%3A+HcZ69h2b%0A%0AThanks+and+Regards%2C%0AEnhance+Team","error":"Not Found","statusCode":404}
+2025-06-10 14:26:42 Array
+(
+    [status] => success
+    [message] => success
+    [data] => Array
+        (
+            [connStatus] => 
+            [messageIDs] => Array
+                (
+                    [0] => BAE5045B426549C6
+                )
+
+        )
+
+)
+

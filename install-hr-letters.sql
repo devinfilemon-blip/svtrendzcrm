@@ -1,0 +1,27 @@
+-- HR Offer / Joining letters — run once if table is missing
+CREATE TABLE IF NOT EXISTS tblhr_letter (
+  iLetterid INT AUTO_INCREMENT PRIMARY KEY,
+  sLetterType ENUM('offer','joining') NOT NULL,
+  sRefNo VARCHAR(50) NOT NULL DEFAULT '',
+  sLetterDate DATE NULL,
+  sEmployeeTitle VARCHAR(20) NOT NULL DEFAULT 'Ms.',
+  sEmployeeName VARCHAR(150) NOT NULL DEFAULT '',
+  sDesignation VARCHAR(150) NOT NULL DEFAULT '',
+  sEmployeeAddress TEXT NULL,
+  sJoiningDate DATE NULL,
+  sJoiningTime VARCHAR(50) NULL,
+  sOfficeLocation VARCHAR(150) NULL,
+  sReportingManager VARCHAR(150) NULL,
+  sSalary VARCHAR(120) NULL,
+  sProbation VARCHAR(100) NULL,
+  iValidityDays INT NULL DEFAULT 7,
+  sCompanyPhone VARCHAR(50) NULL,
+  sCompanyAddress TEXT NULL,
+  sSignaturePath VARCHAR(255) NULL,
+  iCreatedBy INT NULL,
+  sCreatedTimeStamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  sModifiedTimestamp DATETIME NULL ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_type (sLetterType),
+  INDEX idx_name (sEmployeeName),
+  INDEX idx_letter_date (sLetterDate)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

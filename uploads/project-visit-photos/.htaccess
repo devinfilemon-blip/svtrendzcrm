@@ -1,0 +1,7 @@
+# Deny direct web access; files are streamed via view-project-visit-photo.php
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Deny from all
+</IfModule>

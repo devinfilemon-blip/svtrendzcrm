@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(php -l \"/c/xampp/htdocs/svtrendz_infilemon/project-api.php\")",
+      "Bash(ls \"/c/xampp/php/php.exe\" 2>/dev/null && echo FOUND || echo \"not at c/xampp/php\")",
+      "Bash(\"/c/xampp/php/php.exe\" -l \"/c/xampp/htdocs/svtrendz_infilemon/project-api.php\")",
+      "Bash(\"/c/xampp/php/php.exe\" -l \"/c/xampp/htdocs/svtrendz_infilemon/download-project-expense-receipt.php\")",
+      "Bash(\"/c/xampp/php/php.exe\" -l \"/c/xampp/htdocs/svtrendz_infilemon/view-project-visit-photo.php\")",
+      "Bash(\"/c/xampp/php/php.exe\" -l \"/c/xampp/htdocs/svtrendz_infilemon/project-management.php\")",
+      "Bash(\"/c/xampp/php/php.exe\" -l \"/c/xampp/htdocs/svtrendz_infilemon/project-tasks.php\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" \"http://localhost/svtrendz_infilemon/project-api.php\" --max-time 5)",
+      "Bash(curl -s \"http://localhost/svtrendz_infilemon/project-api.php\" -X POST -H \"Content-Type: application/json\" -d '{\"action\":\"list_won_projects\"}' --max-time 8)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" \"http://localhost/svtrendz_infilemon/project-management.php\" --max-time 5)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" \"http://localhost/svtrendz_infilemon/project-tasks.php?lead_id=1\" --max-time 5)",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -u root svtrendz_infilemon -e \"SHOW TABLES LIKE 'tblproject%';\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -u root svtrendz_infilemon -e \"DESCRIBE tblproject_expenses;\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -u root svtrendz_infilemon -e \"DESCRIBE tblproject_visits;\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -u root svtrendz_infilemon -e \"SELECT DISTINCT sRole FROM tbluser;\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -u root svtrendz_infilemon -e \"SELECT iUserid, sName, sRole FROM tbluser;\")",
+      "Bash(\"/c/xampp/mysql/bin/mysql.exe\" -u root svtrendz_infilemon -e \"SELECT iLead_id, sCompany_name, sLead_status, sAssigned_to, sLead_owner FROM tblleads LIMIT 10;\")"
+    ]
+  }
+}

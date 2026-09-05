@@ -1,0 +1,12 @@
+do same as above
+if ($.fn.DataTable.isDataTable('#datatable')) {
+    $('#datatable').DataTable().destroy();
+}
+
+$('#datatable tbody').html(statusRows);
+
+$('#datatable').DataTable({
+    language: {
+        info: "Showing _TOTAL_ entries"
+    }
+});

@@ -1,0 +1,29 @@
+Added field user code
+Quotation number auto increment added
+Error in saving quotation - resolved
+Added lead product details horizontal scroll
+Added Star for required fields in leads
+adding second product, select2 is added in add lead
+list leads by status product name mismatch issue resolved
+
+ else if ($inputData['action'] == 'fngetlistreminder') {
+    // Join tblreminders with tbluser to get user name for each reminder
+  $query = "
+    SELECT r.*, 
+           u.sName AS assigned_to_name, 
+           a.sName AS assigned_by_name
+    FROM tblreminders r
+    LEFT JOIN tbluser u ON r.iUserid = u.iUserid
+    LEFT JOIN tbluser a ON r.sAssigned_by = a.iUserid
+";
+
+
+    $result = mysqli_query($link, $query);
+
+    if ($result) {
+        $reminders = mysqli_fetch_all($result, MYSQLI_ASSOC);
+        echo json_encode(['status' => 'success', 'data' => $reminders]);
+    } else {
+        echo json_encode(['status' => 'error', 'message' => 'No reminder found']);
+    }
+}
