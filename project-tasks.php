@@ -502,16 +502,24 @@ function renderTaskCard(t) {
         deleteBtn = '<button type="button" class="btn btn-sm btn-outline-danger" data-task-del="' + t.id + '" title="Delete">' +
             '<i class="bx bx-trash"></i></button>';
     }
+    var viewBtn = '<button type="button" class="btn btn-sm btn-outline-primary" data-task-view="' + t.id + '" title="View / Start / Complete">' +
+        '<i class="bx bx-show"></i></button>';
+    var trackBadge = '';
+    if (t.has_report) {
+        trackBadge = '<span class="badge bg-soft-success text-success" title="Report submitted"><i class="bx bx-check-double"></i></span>';
+    } else if (t.has_started) {
+        trackBadge = '<span class="badge bg-soft-warning text-warning" title="Started"><i class="bx bx-navigation"></i></span>';
+    }
 
     return '<div class="crm-kanban-card" data-task-id="' + t.id + '" data-locked="' + (locked ? '1' : '0') + '">' +
-        '<div class="crm-kanban-card-title">' + escapeHtml(t.sTitle) + '</div>' +
+        '<div class="crm-kanban-card-title">' + escapeHtml(t.sTitle) + ' ' + trackBadge + '</div>' +
         (t.sDescription ? '<div class="crm-kanban-card-sub">' + escapeHtml(t.sDescription) + '</div>' : '') +
         '<div class="crm-kanban-card-meta">' +
             (t.assigned_name ? '<span><i class="bx bx-user"></i> ' + escapeHtml(t.assigned_name) + '</span>' : '') +
             dueHtml +
         '</div>' +
         (t.created_by_name ? '<div class="crm-kanban-card-assignee"><i class="bx bx-edit-alt"></i> By ' + escapeHtml(t.created_by_name) + '</div>' : '') +
-        (deleteBtn ? '<div class="crm-task-card-actions">' + deleteBtn + '</div>' : '') +
+        '<div class="crm-task-card-actions">' + viewBtn + deleteBtn + '</div>' +
     '</div>';
 }
 
@@ -619,6 +627,13 @@ $('#taskForm').on('submit', function (e) {
 
 $('#mineOnly').on('change', loadTasks);
 $('#refreshTasksBtn').on('click', loadTasks);
+
+$('#taskKanbanBoard').on('click', '[data-task-view]', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var id = $(this).data('task-view');
+    window.location.href = 'project-task-detail.php?id=' + id;
+});
 
 $('#taskKanbanBoard').on('click', '[data-task-del]', function (e) {
     e.preventDefault();
