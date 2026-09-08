@@ -343,6 +343,7 @@ if (isset($_SESSION["userRole"]) && $_SESSION["userRole"] !== "Admin") {
     <ul class="sub-menu" aria-expanded="false">
         <li><a href="project-management.php">Won Projects</a></li>
         <li><a href="project-management-all.php">All Projects</a></li>
+        <li><a href="project-employee-tasks.php">Employee Tasks</a></li>
     </ul>
 </li>
 <?php endif; ?>

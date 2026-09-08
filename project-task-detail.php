@@ -139,19 +139,7 @@ if ($taskId <= 0) {
                         </div>
                     </div>
 
-                    <div class="mt-3 d-flex flex-wrap gap-2">
-                        <button type="button" class="btn btn-primary btn-sm" id="startTaskBtn" style="display:none;">
-                            <i class="bx bx-play-circle"></i> Start Task
-                        </button>
-                    </div>
-
-                    <div class="mt-3" id="completeForm" style="display:none;">
-                        <label class="form-label">Visit / Meeting Report</label>
-                        <textarea class="form-control" id="reportText" rows="4" placeholder="Describe what happened at this visit / meeting..."></textarea>
-                        <button type="button" class="btn btn-success btn-sm mt-2" id="completeTaskBtn">
-                            <i class="bx bx-check-circle"></i> Complete &amp; Submit Report
-                        </button>
-                    </div>
+                    <div class="text-muted small mt-3" id="matchDateNote"></div>
                 </div>
 
                 <div class="pm-detail-card">
@@ -170,7 +158,6 @@ if ($taskId <= 0) {
 <script src="assets/js/app.js"></script>
 <script>
 var TASK_ID = <?php echo (int)$taskId; ?>;
-var PETROL_RATE = 3;
 var currentTask = null;
 
 function escapeHtml(str) {
@@ -228,15 +215,10 @@ function renderLocBox(contentEl, boxEl, lat, lng, time, emptyText) {
         '<iframe class="pm-loc-map" src="' + osmEmbedUrl(lat, lng) + '" loading="lazy"></iframe>';
 }
 
-function getCurrentLocation() {
-    return new Promise(function (resolve, reject) {
-        if (!navigator.geolocation) { reject(new Error('Geolocation is not supported on this device/browser')); return; }
-        navigator.geolocation.getCurrentPosition(
-            function (pos) { resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }); },
-            function () { reject(new Error('Could not get your current location. Please allow location access.')); },
-            { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
-        );
-    });
+function formatDateOnly(d) {
+    if (!d) return '';
+    var parts = String(d).slice(0, 10).split('-');
+    return parts.length === 3 ? (parts[2] + '-' + parts[1] + '-' + parts[0]) : d;
 }
 
 function loadTask() {
@@ -272,12 +254,19 @@ function loadTask() {
         } else {
             document.getElementById('travelStats').style.display = 'none';
         }
+        document.getElementById('matchDateNote').textContent = t.match_date
+            ? ('Location & report shown are matched by date: ' + formatDateOnly(t.match_date))
+            : '';
 
-        document.getElementById('startTaskBtn').style.display = t.can_start ? '' : 'none';
-        document.getElementById('completeForm').style.display = t.can_complete ? '' : 'none';
-
+        var reportLines = [];
+        if (t.visit_type) {
+            reportLines.push(t.visit_type + (t.visit_location ? ' — ' + t.visit_location : ''));
+        }
         if (t.report) {
-            document.getElementById('reportDisplay').textContent = t.report;
+            reportLines.push(t.report);
+        }
+        if (reportLines.length) {
+            document.getElementById('reportDisplay').textContent = reportLines.join('\n');
             document.getElementById('reportDisplay').classList.remove('text-muted');
         } else {
             document.getElementById('reportDisplay').textContent = 'No report submitted yet.';
@@ -287,44 +276,6 @@ function loadTask() {
 }
 
 document.getElementById('refreshBtn').addEventListener('click', loadTask);
-
-document.getElementById('startTaskBtn').addEventListener('click', function () {
-    var btn = this;
-    btn.disabled = true;
-    getCurrentLocation().then(function (loc) {
-        return api({ action: 'start_project_task', id: TASK_ID, latitude: loc.lat, longitude: loc.lng });
-    }).then(function (res) {
-        showMsg((res && res.message) || 'Failed to start task', !!(res && res.status === 'success'));
-        if (res && res.status === 'success') loadTask();
-    }).catch(function (err) {
-        showMsg(err.message || 'Could not get your current location', false);
-    }).finally(function () {
-        btn.disabled = false;
-    });
-});
-
-document.getElementById('completeTaskBtn').addEventListener('click', function () {
-    var report = document.getElementById('reportText').value.trim();
-    if (!report) {
-        showMsg('Please add a visit/meeting report before completing', false);
-        return;
-    }
-    var btn = this;
-    btn.disabled = true;
-    getCurrentLocation().then(function (loc) {
-        return api({ action: 'complete_project_task', id: TASK_ID, latitude: loc.lat, longitude: loc.lng, report: report });
-    }).then(function (res) {
-        showMsg((res && res.message) || 'Failed to complete task', !!(res && res.status === 'success'));
-        if (res && res.status === 'success') {
-            document.getElementById('reportText').value = '';
-            loadTask();
-        }
-    }).catch(function (err) {
-        showMsg(err.message || 'Could not get your current location', false);
-    }).finally(function () {
-        btn.disabled = false;
-    });
-});
 
 $(document).ready(loadTask);
 </script>

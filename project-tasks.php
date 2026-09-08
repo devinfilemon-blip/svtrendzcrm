@@ -502,7 +502,7 @@ function renderTaskCard(t) {
         deleteBtn = '<button type="button" class="btn btn-sm btn-outline-danger" data-task-del="' + t.id + '" title="Delete">' +
             '<i class="bx bx-trash"></i></button>';
     }
-    var viewBtn = '<button type="button" class="btn btn-sm btn-outline-primary" data-task-view="' + t.id + '" title="View / Start / Complete">' +
+    var viewBtn = '<button type="button" class="btn btn-sm btn-outline-primary" data-task-view="' + t.id + '" title="View location, travel cost &amp; report">' +
         '<i class="bx bx-show"></i></button>';
     var trackBadge = '';
     if (t.has_report) {

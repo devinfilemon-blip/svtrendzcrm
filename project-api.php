@@ -70,15 +70,11 @@ function ensureProjectTasksTable($link)
     if (!mysqli_query($link, $sql)) {
         jsonOut(['status' => 'error', 'message' => 'Could not prepare project tasks table: ' . mysqli_error($link)]);
     }
-    // Table may pre-date these columns on older deployments; add them if missing.
+    // Table may pre-date this column on older deployments; add it if missing.
+    // Start/end location comes from tbllocation and the report comes from
+    // tblproject_visits — both matched to the task by employee + date, not
+    // stored on this table (see getEmployeeDayLocationRange / getMatchingVisitReport).
     ensureColumn($link, 'tblproject_tasks', 'sDue_date', 'DATE NULL');
-    ensureColumn($link, 'tblproject_tasks', 'sStartLatitude', 'DECIMAL(10,7) NULL');
-    ensureColumn($link, 'tblproject_tasks', 'sStartLongitude', 'DECIMAL(10,7) NULL');
-    ensureColumn($link, 'tblproject_tasks', 'sStartTime', 'DATETIME NULL');
-    ensureColumn($link, 'tblproject_tasks', 'sEndLatitude', 'DECIMAL(10,7) NULL');
-    ensureColumn($link, 'tblproject_tasks', 'sEndLongitude', 'DECIMAL(10,7) NULL');
-    ensureColumn($link, 'tblproject_tasks', 'sEndTime', 'DATETIME NULL');
-    ensureColumn($link, 'tblproject_tasks', 'sReport', 'TEXT NULL');
 }
 
 if (!defined('PROJECT_TASK_PETROL_RATE_PER_KM')) {
@@ -196,6 +192,73 @@ function ensureLocationTable($link)
     if (!mysqli_query($link, $sql)) {
         jsonOut(['status' => 'error', 'message' => 'Could not prepare location table: ' . mysqli_error($link)]);
     }
+}
+
+// A task has no direct link to tbllocation, so its "start/end location" is
+// inferred as the assignee's earliest and latest GPS pings on the task's
+// relevant date (due date, falling back to the date the task was created).
+// Start = first ping of that day; End = the last ping's End* point if the
+// mobile app recorded one, else that same ping's point.
+function getEmployeeDayLocationRange($link, $userId, $date)
+{
+    $stmt = $link->prepare("SELECT dLatitude, dLongitude, sDateTime, dEndLatitude, dEndLongitude, sEndDateTime
+        FROM tbllocation WHERE iUserid = ? AND DATE(sDateTime) = ? ORDER BY sDateTime ASC");
+    $stmt->bind_param('is', $userId, $date);
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+    if (!$rows) {
+        return null;
+    }
+    $first = $rows[0];
+    $last = $rows[count($rows) - 1];
+    return [
+        'start_lat' => $first['dLatitude'],
+        'start_lng' => $first['dLongitude'],
+        'start_time' => $first['sDateTime'],
+        'end_lat' => $last['dEndLatitude'] !== null ? $last['dEndLatitude'] : $last['dLatitude'],
+        'end_lng' => $last['dEndLongitude'] !== null ? $last['dEndLongitude'] : $last['dLongitude'],
+        'end_time' => $last['sEndDateTime'] !== null ? $last['sEndDateTime'] : $last['sDateTime'],
+    ];
+}
+
+// The Visit/Meeting log entry (from the "Entries" tab, tblproject_visits) for
+// this project + employee on the task's relevant date, if one was logged —
+// used as the task's "visit/meeting report".
+function getMatchingVisitReport($link, $leadId, $userId, $date)
+{
+    $stmt = $link->prepare("SELECT sVisitType, sVisitDate, sLocation, sNotes
+        FROM tblproject_visits WHERE lead_id = ? AND iUserid = ? AND sVisitDate = ?
+        ORDER BY id DESC LIMIT 1");
+    $stmt->bind_param('iis', $leadId, $userId, $date);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row ?: null;
+}
+
+// The date used to match tbllocation pings / visit-log entries to a task.
+// A due date pins it exactly. Without one (an open-ended task), showing the
+// day it was created is an arbitrary date that's unlikely to have any real
+// location/visit data — instead use the assignee's most recently tracked
+// day, so an open task reflects where they currently/last were.
+function taskMatchDate($link, $task)
+{
+    if (!empty($task['sDue_date'])) {
+        return $task['sDue_date'];
+    }
+    $assignedTo = (int)($task['sAssigned_to'] ?? 0);
+    if ($assignedTo > 0) {
+        $stmt = $link->prepare("SELECT DATE(sDateTime) AS d FROM tbllocation WHERE iUserid = ? ORDER BY sDateTime DESC LIMIT 1");
+        $stmt->bind_param('i', $assignedTo);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($row && !empty($row['d'])) {
+            return $row['d'];
+        }
+    }
+    return substr((string)$task['sCreated_at'], 0, 10);
 }
 
 try {
@@ -674,6 +737,9 @@ if ($action === 'list_project_tasks') {
     $result = $stmt->get_result();
     $tasks = [];
     while ($row = $result->fetch_assoc()) {
+        $matchDate = taskMatchDate($link, $row);
+        $dayRange = getEmployeeDayLocationRange($link, (int)$row['sAssigned_to'], $matchDate);
+        $visit = getMatchingVisitReport($link, (int)$row['lead_id'], (int)$row['sAssigned_to'], $matchDate);
         $tasks[] = [
             'id' => (int)$row['id'],
             'lead_id' => (int)$row['lead_id'],
@@ -686,14 +752,87 @@ if ($action === 'list_project_tasks') {
             'sStatus' => $row['sStatus'],
             'sDue_date' => $row['sDue_date'],
             'sCreated_at' => $row['sCreated_at'],
-            'has_started' => !empty($row['sStartTime']),
-            'has_report' => !empty($row['sEndTime']),
+            'has_started' => $dayRange !== null,
+            'has_report' => $visit !== null && !empty($visit['sNotes']),
         ];
     }
     $stmt->close();
     jsonOut(['status' => 'success', 'data' => $tasks]);
 }
 
+// Cross-project task list for one employee (or, for Admin, every employee) —
+// used by the "Employee Tasks" page so a task can be opened from anywhere,
+// not just from inside its own project's Kanban board.
+if ($action === 'list_employee_tasks') {
+    $requestedEmployeeId = (int)($input['employee_id'] ?? 0);
+    $employeeId = $isAdmin ? $requestedEmployeeId : $userId;
+
+    $sql = "SELECT t.*, l.sCompany_name, l.sLead_name, a.sName AS assigned_name, c.sName AS created_by_name
+            FROM tblproject_tasks t
+            LEFT JOIN tblleads l ON l.iLead_id = t.lead_id
+            LEFT JOIN tbluser a ON a.iUserid = t.sAssigned_to
+            LEFT JOIN tbluser c ON c.iUserid = t.sCreated_by";
+    if ($employeeId > 0) {
+        $sql .= " WHERE t.sAssigned_to = ?";
+    }
+    $sql .= " ORDER BY a.sName, FIELD(t.sStatus, 'Pending', 'In Progress', 'Done'), t.sDue_date IS NULL, t.sDue_date ASC, t.id DESC";
+
+    $stmt = $link->prepare($sql);
+    if (!$stmt) {
+        jsonOut(['status' => 'error', 'message' => 'Query prepare failed: ' . $link->error]);
+    }
+    if ($employeeId > 0) {
+        $stmt->bind_param('i', $employeeId);
+    }
+    if (!$stmt->execute()) {
+        jsonOut(['status' => 'error', 'message' => 'Query failed: ' . $stmt->error]);
+    }
+    $result = $stmt->get_result();
+    $tasks = [];
+    $totalDistance = 0.0;
+    $totalPetrol = 0.0;
+    while ($row = $result->fetch_assoc()) {
+        $matchDate = taskMatchDate($link, $row);
+        $dayRange = getEmployeeDayLocationRange($link, (int)$row['sAssigned_to'], $matchDate);
+        $visit = getMatchingVisitReport($link, (int)$row['lead_id'], (int)$row['sAssigned_to'], $matchDate);
+        $distanceKm = $dayRange !== null
+            ? haversineDistanceKm($dayRange['start_lat'], $dayRange['start_lng'], $dayRange['end_lat'], $dayRange['end_lng'])
+            : null;
+        $petrolCost = $distanceKm !== null ? round($distanceKm * PROJECT_TASK_PETROL_RATE_PER_KM, 2) : null;
+        if ($distanceKm !== null) {
+            $totalDistance += $distanceKm;
+            $totalPetrol += $petrolCost;
+        }
+        $tasks[] = [
+            'id' => (int)$row['id'],
+            'lead_id' => (int)$row['lead_id'],
+            'project_name' => $row['sCompany_name'] ?: $row['sLead_name'],
+            'sTitle' => $row['sTitle'],
+            'sAssigned_to' => (int)$row['sAssigned_to'],
+            'assigned_name' => $row['assigned_name'],
+            'sStatus' => $row['sStatus'],
+            'sDue_date' => $row['sDue_date'],
+            'has_started' => $dayRange !== null,
+            'has_report' => $visit !== null && !empty($visit['sNotes']),
+            'distance_km' => $distanceKm !== null ? round($distanceKm, 2) : null,
+            'petrol_cost' => $petrolCost,
+        ];
+    }
+    $stmt->close();
+    jsonOut([
+        'status' => 'success',
+        'data' => $tasks,
+        'summary' => [
+            'total_tasks' => count($tasks),
+            'total_done' => count(array_filter($tasks, static function ($t) { return $t['sStatus'] === 'Done'; })),
+            'total_distance_km' => round($totalDistance, 2),
+            'total_petrol_cost' => round($totalPetrol, 2),
+        ],
+    ]);
+}
+
+// Read-only task detail: location and report are inferred (not stored on the
+// task itself) — see getEmployeeDayLocationRange / getMatchingVisitReport.
 if ($action === 'get_project_task') {
     $taskId = (int)($input['id'] ?? 0);
     if ($taskId <= 0) {
@@ -716,15 +855,19 @@ if ($action === 'get_project_task') {
         jsonOut(['status' => 'error', 'message' => 'Access denied']);
     }
 
-    $distanceKm = haversineDistanceKm(
-        $task['sStartLatitude'],
-        $task['sStartLongitude'],
-        $task['sEndLatitude'],
-        $task['sEndLongitude']
-    );
+    $matchDate = taskMatchDate($link, $task);
+    $dayRange = getEmployeeDayLocationRange($link, (int)$task['sAssigned_to'], $matchDate);
+    $visit = getMatchingVisitReport($link, (int)$task['lead_id'], (int)$task['sAssigned_to'], $matchDate);
+
+    $startLat = $dayRange['start_lat'] ?? null;
+    $startLng = $dayRange['start_lng'] ?? null;
+    $startTime = $dayRange['start_time'] ?? null;
+    $endLat = $dayRange['end_lat'] ?? null;
+    $endLng = $dayRange['end_lng'] ?? null;
+    $endTime = $dayRange['end_time'] ?? null;
+
+    $distanceKm = haversineDistanceKm($startLat, $startLng, $endLat, $endLng);
     $petrolCost = $distanceKm !== null ? round($distanceKm * PROJECT_TASK_PETROL_RATE_PER_KM, 2) : null;
-    $canEditAll = $isAdmin || (int)$lead['sLead_owner'] === $userId || in_array($userId, normalizeAssignedIds($lead['sAssigned_to'] ?? ''), true);
-    $isAssignee = (int)$task['sAssigned_to'] === $userId;
 
     jsonOut([
         'status' => 'success',
@@ -742,106 +885,21 @@ if ($action === 'get_project_task') {
             'sStatus' => $task['sStatus'],
             'sDue_date' => $task['sDue_date'],
             'sCreated_at' => $task['sCreated_at'],
-            'start_latitude' => $task['sStartLatitude'] !== null ? (float)$task['sStartLatitude'] : null,
-            'start_longitude' => $task['sStartLongitude'] !== null ? (float)$task['sStartLongitude'] : null,
-            'start_time' => $task['sStartTime'],
-            'end_latitude' => $task['sEndLatitude'] !== null ? (float)$task['sEndLatitude'] : null,
-            'end_longitude' => $task['sEndLongitude'] !== null ? (float)$task['sEndLongitude'] : null,
-            'end_time' => $task['sEndTime'],
-            'report' => $task['sReport'],
+            'match_date' => $matchDate,
+            'start_latitude' => $startLat !== null ? (float)$startLat : null,
+            'start_longitude' => $startLng !== null ? (float)$startLng : null,
+            'start_time' => $startTime,
+            'end_latitude' => $endLat !== null ? (float)$endLat : null,
+            'end_longitude' => $endLng !== null ? (float)$endLng : null,
+            'end_time' => $endTime,
+            'report' => $visit['sNotes'] ?? null,
+            'visit_type' => $visit['sVisitType'] ?? null,
+            'visit_location' => $visit['sLocation'] ?? null,
             'distance_km' => $distanceKm !== null ? round($distanceKm, 2) : null,
             'petrol_cost' => $petrolCost,
             'petrol_rate_per_km' => PROJECT_TASK_PETROL_RATE_PER_KM,
-            'can_start' => ($isAssignee || $canEditAll) && empty($task['sEndTime']),
-            'can_complete' => ($isAssignee || $canEditAll) && !empty($task['sStartTime']) && empty($task['sEndTime']),
         ],
     ]);
-}
-
-if ($action === 'start_project_task') {
-    $taskId = (int)($input['id'] ?? 0);
-    $lat = (isset($input['latitude']) && $input['latitude'] !== '') ? (float)$input['latitude'] : null;
-    $lng = (isset($input['longitude']) && $input['longitude'] !== '') ? (float)$input['longitude'] : null;
-    if ($taskId <= 0 || $lat === null || $lng === null) {
-        jsonOut(['status' => 'error', 'message' => 'Task and current location are required']);
-    }
-
-    $stmt = $link->prepare("SELECT * FROM tblproject_tasks WHERE id = ? LIMIT 1");
-    $stmt->bind_param('i', $taskId);
-    $stmt->execute();
-    $task = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-    if (!$task) {
-        jsonOut(['status' => 'error', 'message' => 'Task not found']);
-    }
-    $lead = getLeadRow($link, (int)$task['lead_id']);
-    if (!$lead || !userCanAccessProject($lead, $userId, $isAdmin)) {
-        jsonOut(['status' => 'error', 'message' => 'Access denied']);
-    }
-    $canEditAll = $isAdmin || (int)$lead['sLead_owner'] === $userId || in_array($userId, normalizeAssignedIds($lead['sAssigned_to'] ?? ''), true);
-    $isAssignee = (int)$task['sAssigned_to'] === $userId;
-    if (!$isAssignee && !$canEditAll) {
-        jsonOut(['status' => 'error', 'message' => 'Only the assignee can start this task']);
-    }
-    if (!empty($task['sEndTime'])) {
-        jsonOut(['status' => 'error', 'message' => 'This task has already been completed']);
-    }
-
-    $now = date('Y-m-d H:i:s');
-    $newStatus = $task['sStatus'] === 'Pending' ? 'In Progress' : $task['sStatus'];
-    $upd = $link->prepare("UPDATE tblproject_tasks SET sStartLatitude = ?, sStartLongitude = ?, sStartTime = ?, sStatus = ? WHERE id = ?");
-    $upd->bind_param('ddssi', $lat, $lng, $now, $newStatus, $taskId);
-    $ok = $upd->execute();
-    $upd->close();
-    jsonOut($ok
-        ? ['status' => 'success', 'message' => 'Task started']
-        : ['status' => 'error', 'message' => 'Could not start task']);
-}
-
-if ($action === 'complete_project_task') {
-    $taskId = (int)($input['id'] ?? 0);
-    $lat = (isset($input['latitude']) && $input['latitude'] !== '') ? (float)$input['latitude'] : null;
-    $lng = (isset($input['longitude']) && $input['longitude'] !== '') ? (float)$input['longitude'] : null;
-    $report = trim((string)($input['report'] ?? ''));
-    if ($taskId <= 0 || $lat === null || $lng === null) {
-        jsonOut(['status' => 'error', 'message' => 'Task and current location are required']);
-    }
-    if ($report === '') {
-        jsonOut(['status' => 'error', 'message' => 'Please add a visit/meeting report before completing']);
-    }
-
-    $stmt = $link->prepare("SELECT * FROM tblproject_tasks WHERE id = ? LIMIT 1");
-    $stmt->bind_param('i', $taskId);
-    $stmt->execute();
-    $task = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-    if (!$task) {
-        jsonOut(['status' => 'error', 'message' => 'Task not found']);
-    }
-    $lead = getLeadRow($link, (int)$task['lead_id']);
-    if (!$lead || !userCanAccessProject($lead, $userId, $isAdmin)) {
-        jsonOut(['status' => 'error', 'message' => 'Access denied']);
-    }
-    $canEditAll = $isAdmin || (int)$lead['sLead_owner'] === $userId || in_array($userId, normalizeAssignedIds($lead['sAssigned_to'] ?? ''), true);
-    $isAssignee = (int)$task['sAssigned_to'] === $userId;
-    if (!$isAssignee && !$canEditAll) {
-        jsonOut(['status' => 'error', 'message' => 'Only the assignee can complete this task']);
-    }
-    if (empty($task['sStartTime'])) {
-        jsonOut(['status' => 'error', 'message' => 'Start the task before submitting a report']);
-    }
-    if (!empty($task['sEndTime'])) {
-        jsonOut(['status' => 'error', 'message' => 'This task has already been completed']);
-    }
-
-    $now = date('Y-m-d H:i:s');
-    $upd = $link->prepare("UPDATE tblproject_tasks SET sEndLatitude = ?, sEndLongitude = ?, sEndTime = ?, sReport = ?, sStatus = 'Done' WHERE id = ?");
-    $upd->bind_param('ddssi', $lat, $lng, $now, $report, $taskId);
-    $ok = $upd->execute();
-    $upd->close();
-    jsonOut($ok
-        ? ['status' => 'success', 'message' => 'Task completed and report submitted']
-        : ['status' => 'error', 'message' => 'Could not complete task']);
 }
 
 if ($action === 'add_project_task') {
