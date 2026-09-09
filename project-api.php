@@ -21,11 +21,64 @@ register_shutdown_function(function () {
     }
 });
 
-if (!isset($_SESSION['user_id'])) {
+// Body must be parsed before resolving auth — a mobile client without a
+// session cookie can send its token in the JSON body instead of a header.
+$raw = file_get_contents('php://input');
+$input = json_decode($raw, true);
+if (!is_array($input)) {
+    $input = $_POST;
+}
+
+/**
+ * Resolve the logged-in user's ID from the PHP session (web) or a mobile
+ * app's "Authorization: Bearer <token>" header / "token" body field — same
+ * convention as api.php's resolveAuthUserId(), so the mobile app can call
+ * this file without needing a browser session cookie.
+ */
+function resolveProjectAuthUserId(mysqli $link, array $inputData): int
+{
+    if (isset($_SESSION['user_id'])) {
+        return (int)$_SESSION['user_id'];
+    }
+    $token = '';
+    $headers = function_exists('getallheaders') ? getallheaders() : [];
+    foreach ($headers as $hName => $hValue) {
+        if (strcasecmp($hName, 'Authorization') === 0) {
+            $token = preg_match('/Bearer\s+(.+)/i', $hValue, $m) ? trim($m[1]) : trim($hValue);
+            break;
+        }
+    }
+    if ($token === '' && !empty($inputData['token'])) {
+        $token = trim((string)$inputData['token']);
+    }
+    if ($token === '') {
+        return 0;
+    }
+    $stmt = mysqli_prepare($link, "SELECT user_id, sExpire FROM tbltoken WHERE sToken = ? ORDER BY id DESC LIMIT 1");
+    if (!$stmt) {
+        return 0;
+    }
+    mysqli_stmt_bind_param($stmt, "s", $token);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);
+    if (!$result || mysqli_num_rows($result) === 0) {
+        return 0;
+    }
+    $row = mysqli_fetch_assoc($result);
+    if (strtotime($row['sExpire']) < time()) {
+        return 0;
+    }
+    return (int)$row['user_id'];
+}
+
+$authUserId = resolveProjectAuthUserId($link, $input);
+if ($authUserId <= 0) {
     echo json_encode(['status' => 'error', 'message' => 'Unauthorized']);
     exit;
 }
 
+// Token-only (app) calls have no PHP session, so this only ever blocks a
+// browser-session Client — consistent with api.php's mobile actions.
 if (isset($_SESSION['userRole']) && $_SESSION['userRole'] === 'Client') {
     echo json_encode(['status' => 'error', 'message' => 'Access denied.']);
     exit;
@@ -70,11 +123,11 @@ function ensureProjectTasksTable($link)
     if (!mysqli_query($link, $sql)) {
         jsonOut(['status' => 'error', 'message' => 'Could not prepare project tasks table: ' . mysqli_error($link)]);
     }
-    // Table may pre-date this column on older deployments; add it if missing.
-    // Start/end location comes from tbllocation and the report comes from
-    // tblproject_visits — both matched to the task by employee + date, not
-    // stored on this table (see getEmployeeDayLocationRange / getMatchingVisitReport).
+    // Table may pre-date these columns on older deployments; add them if missing.
     ensureColumn($link, 'tblproject_tasks', 'sDue_date', 'DATE NULL');
+    // The mobile app's Start Task / Submit & Mark Completed flow writes the
+    // meeting/visit report straight onto the task (see complete_project_task).
+    ensureColumn($link, 'tblproject_tasks', 'sReport', 'TEXT NULL');
 }
 
 if (!defined('PROJECT_TASK_PETROL_RATE_PER_KM')) {
@@ -192,6 +245,22 @@ function ensureLocationTable($link)
     if (!mysqli_query($link, $sql)) {
         jsonOut(['status' => 'error', 'message' => 'Could not prepare location table: ' . mysqli_error($link)]);
     }
+    // Links a location row to the project task it was captured for, via the
+    // mobile app's Start Task / Submit & Mark Completed flow. NULL for
+    // ordinary attendance/location-report rows.
+    ensureColumn($link, 'tbllocation', 'task_id', 'INT NULL');
+    ensureIndex($link, 'tbllocation', 'idx_task', 'task_id');
+}
+
+function ensureIndex($link, $table, $indexName, $columnsSql)
+{
+    $table = mysqli_real_escape_string($link, $table);
+    $indexName = mysqli_real_escape_string($link, $indexName);
+    $result = mysqli_query($link, "SHOW INDEX FROM `$table` WHERE Key_name = '$indexName'");
+    if ($result && mysqli_num_rows($result) > 0) {
+        return;
+    }
+    mysqli_query($link, "ALTER TABLE `$table` ADD INDEX `$indexName` ($columnsSql)");
 }
 
 // A task has no direct link to tbllocation, so its "start/end location" is
@@ -287,14 +356,8 @@ try {
     jsonOut(['status' => 'error', 'message' => 'Database setup failed: ' . $e->getMessage()]);
 }
 
-$raw = file_get_contents('php://input');
-$input = json_decode($raw, true);
-if (!is_array($input)) {
-    $input = $_POST;
-}
-
 $action = isset($input['action']) ? $input['action'] : '';
-$userId = (int)$_SESSION['user_id'];
+$userId = $authUserId;
 $isAdmin = (isset($_SESSION['userRole']) && $_SESSION['userRole'] === 'Admin');
 $wonStatusId = '6'; // Won
 
@@ -849,6 +912,19 @@ if ($action === 'list_employee_tasks') {
 
 // Read-only task detail: location and report are inferred (not stored on the
 // task itself) — see getEmployeeDayLocationRange / getMatchingVisitReport.
+// Latest tbllocation row captured explicitly for this task (mobile Start Task /
+// Submit & Mark Completed), or null if it was never started that way.
+function getTaskLocationRow($link, $taskId)
+{
+    $stmt = $link->prepare("SELECT iLocationid, dLatitude, dLongitude, sDateTime, dEndLatitude, dEndLongitude, sEndDateTime
+        FROM tbllocation WHERE task_id = ? ORDER BY iLocationid DESC LIMIT 1");
+    $stmt->bind_param('i', $taskId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row ?: null;
+}
+
 if ($action === 'get_project_task') {
     $taskId = (int)($input['id'] ?? 0);
     if ($taskId <= 0) {
@@ -871,19 +947,42 @@ if ($action === 'get_project_task') {
         jsonOut(['status' => 'error', 'message' => 'Access denied']);
     }
 
-    $matchDate = taskMatchDate($link, $task);
-    $dayRange = getEmployeeDayLocationRange($link, (int)$task['sAssigned_to'], $matchDate);
-    $visit = getMatchingVisitReport($link, (int)$task['lead_id'], (int)$task['sAssigned_to'], $matchDate);
-
-    $startLat = $dayRange['start_lat'] ?? null;
-    $startLng = $dayRange['start_lng'] ?? null;
-    $startTime = $dayRange['start_time'] ?? null;
-    $endLat = $dayRange['end_lat'] ?? null;
-    $endLng = $dayRange['end_lng'] ?? null;
-    $endTime = $dayRange['end_time'] ?? null;
+    $matchDate = null;
+    $loc = getTaskLocationRow($link, $taskId);
+    if ($loc) {
+        // Exact per-task tracking from the mobile Start/Complete flow — authoritative.
+        $startLat = $loc['dLatitude'];
+        $startLng = $loc['dLongitude'];
+        $startTime = $loc['sDateTime'];
+        $endLat = $loc['dEndLatitude'];
+        $endLng = $loc['dEndLongitude'];
+        $endTime = $loc['sEndDateTime'];
+        $report = $task['sReport'];
+        $visitType = null;
+        $visitLocation = null;
+        $visitPhotos = [];
+    } else {
+        // Never explicitly started/completed — best-effort guess from the
+        // assignee's day-level GPS pings and any Visit/Meeting logged that day.
+        $matchDate = taskMatchDate($link, $task);
+        $dayRange = getEmployeeDayLocationRange($link, (int)$task['sAssigned_to'], $matchDate);
+        $visit = getMatchingVisitReport($link, (int)$task['lead_id'], (int)$task['sAssigned_to'], $matchDate);
+        $startLat = $dayRange['start_lat'] ?? null;
+        $startLng = $dayRange['start_lng'] ?? null;
+        $startTime = $dayRange['start_time'] ?? null;
+        $endLat = $dayRange['end_lat'] ?? null;
+        $endLng = $dayRange['end_lng'] ?? null;
+        $endTime = $dayRange['end_time'] ?? null;
+        $report = $visit['sNotes'] ?? $task['sReport'];
+        $visitType = $visit['sVisitType'] ?? null;
+        $visitLocation = $visit['sLocation'] ?? null;
+        $visitPhotos = $visit ? getVisitPhotoIds($link, (int)$visit['id']) : [];
+    }
 
     $distanceKm = haversineDistanceKm($startLat, $startLng, $endLat, $endLng);
     $petrolCost = $distanceKm !== null ? round($distanceKm * PROJECT_TASK_PETROL_RATE_PER_KM, 2) : null;
+    $canEditAll = $isAdmin || (int)$lead['sLead_owner'] === $userId || in_array($userId, normalizeAssignedIds($lead['sAssigned_to'] ?? ''), true);
+    $isAssignee = (int)$task['sAssigned_to'] === $userId;
 
     jsonOut([
         'status' => 'success',
@@ -908,15 +1007,129 @@ if ($action === 'get_project_task') {
             'end_latitude' => $endLat !== null ? (float)$endLat : null,
             'end_longitude' => $endLng !== null ? (float)$endLng : null,
             'end_time' => $endTime,
-            'report' => $visit['sNotes'] ?? null,
-            'visit_type' => $visit['sVisitType'] ?? null,
-            'visit_location' => $visit['sLocation'] ?? null,
-            'visit_photos' => $visit ? getVisitPhotoIds($link, (int)$visit['id']) : [],
+            'report' => $report,
+            'visit_type' => $visitType,
+            'visit_location' => $visitLocation,
+            'visit_photos' => $visitPhotos,
             'distance_km' => $distanceKm !== null ? round($distanceKm, 2) : null,
             'petrol_cost' => $petrolCost,
             'petrol_rate_per_km' => PROJECT_TASK_PETROL_RATE_PER_KM,
+            'can_start' => ($isAssignee || $canEditAll) && $task['sStatus'] !== 'Done',
+            'can_complete' => ($isAssignee || $canEditAll) && !empty($startTime) && empty($endTime),
         ],
     ]);
+}
+
+// Mobile "Start Task": records the assignee's current GPS point against this
+// specific task (not just their day-level pings), so completion later gives
+// an exact distance instead of a date-matched guess.
+if ($action === 'start_project_task') {
+    $taskId = (int)($input['id'] ?? 0);
+    $lat = (isset($input['latitude']) && $input['latitude'] !== '') ? (float)$input['latitude'] : null;
+    $lng = (isset($input['longitude']) && $input['longitude'] !== '') ? (float)$input['longitude'] : null;
+    if ($taskId <= 0 || $lat === null || $lng === null) {
+        jsonOut(['status' => 'error', 'message' => 'Task and current location are required']);
+    }
+
+    $stmt = $link->prepare("SELECT * FROM tblproject_tasks WHERE id = ? LIMIT 1");
+    $stmt->bind_param('i', $taskId);
+    $stmt->execute();
+    $task = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if (!$task) {
+        jsonOut(['status' => 'error', 'message' => 'Task not found']);
+    }
+    $lead = getLeadRow($link, (int)$task['lead_id']);
+    if (!$lead || !userCanAccessProject($lead, $userId, $isAdmin)) {
+        jsonOut(['status' => 'error', 'message' => 'Access denied']);
+    }
+    $canEditAll = $isAdmin || (int)$lead['sLead_owner'] === $userId || in_array($userId, normalizeAssignedIds($lead['sAssigned_to'] ?? ''), true);
+    $isAssignee = (int)$task['sAssigned_to'] === $userId;
+    if (!$isAssignee && !$canEditAll) {
+        jsonOut(['status' => 'error', 'message' => 'Only the assignee can start this task']);
+    }
+    if ($task['sStatus'] === 'Done') {
+        jsonOut(['status' => 'error', 'message' => 'This task has already been completed']);
+    }
+
+    $now = date('Y-m-d H:i:s');
+    $loc = getTaskLocationRow($link, $taskId);
+    if ($loc && empty($loc['sEndDateTime'])) {
+        // Already started and not yet completed — treat this as a restart point.
+        $upd = $link->prepare("UPDATE tbllocation SET dLatitude = ?, dLongitude = ?, sDateTime = ? WHERE iLocationid = ?");
+        $upd->bind_param('ddsi', $lat, $lng, $now, $loc['iLocationid']);
+    } else {
+        $upd = $link->prepare("INSERT INTO tbllocation (iUserid, dLatitude, dLongitude, sDateTime, task_id) VALUES (?, ?, ?, ?, ?)");
+        $upd->bind_param('iddsi', $userId, $lat, $lng, $now, $taskId);
+    }
+    $ok = $upd->execute();
+    $upd->close();
+    if (!$ok) {
+        jsonOut(['status' => 'error', 'message' => 'Could not start task']);
+    }
+
+    $newStatus = $task['sStatus'] === 'Pending' ? 'In Progress' : $task['sStatus'];
+    $updTask = $link->prepare("UPDATE tblproject_tasks SET sStatus = ? WHERE id = ?");
+    $updTask->bind_param('si', $newStatus, $taskId);
+    $updTask->execute();
+    $updTask->close();
+
+    jsonOut(['status' => 'success', 'message' => 'Task started']);
+}
+
+// Mobile "Submit & Mark Completed": fills in the end GPS point and saves the
+// meeting/visit report, marking the task Done.
+if ($action === 'complete_project_task') {
+    $taskId = (int)($input['id'] ?? 0);
+    $lat = (isset($input['latitude']) && $input['latitude'] !== '') ? (float)$input['latitude'] : null;
+    $lng = (isset($input['longitude']) && $input['longitude'] !== '') ? (float)$input['longitude'] : null;
+    $report = trim((string)($input['report'] ?? ''));
+    if ($taskId <= 0 || $lat === null || $lng === null) {
+        jsonOut(['status' => 'error', 'message' => 'Task and current location are required']);
+    }
+    if ($report === '') {
+        jsonOut(['status' => 'error', 'message' => 'Please add a visit/meeting report before completing']);
+    }
+
+    $stmt = $link->prepare("SELECT * FROM tblproject_tasks WHERE id = ? LIMIT 1");
+    $stmt->bind_param('i', $taskId);
+    $stmt->execute();
+    $task = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if (!$task) {
+        jsonOut(['status' => 'error', 'message' => 'Task not found']);
+    }
+    $lead = getLeadRow($link, (int)$task['lead_id']);
+    if (!$lead || !userCanAccessProject($lead, $userId, $isAdmin)) {
+        jsonOut(['status' => 'error', 'message' => 'Access denied']);
+    }
+    $canEditAll = $isAdmin || (int)$lead['sLead_owner'] === $userId || in_array($userId, normalizeAssignedIds($lead['sAssigned_to'] ?? ''), true);
+    $isAssignee = (int)$task['sAssigned_to'] === $userId;
+    if (!$isAssignee && !$canEditAll) {
+        jsonOut(['status' => 'error', 'message' => 'Only the assignee can complete this task']);
+    }
+    $loc = getTaskLocationRow($link, $taskId);
+    if (!$loc) {
+        jsonOut(['status' => 'error', 'message' => 'Start the task before submitting a report']);
+    }
+    if (!empty($loc['sEndDateTime'])) {
+        jsonOut(['status' => 'error', 'message' => 'This task has already been completed']);
+    }
+
+    $now = date('Y-m-d H:i:s');
+    $updLoc = $link->prepare("UPDATE tbllocation SET dEndLatitude = ?, dEndLongitude = ?, sEndDateTime = ? WHERE iLocationid = ?");
+    $updLoc->bind_param('ddsi', $lat, $lng, $now, $loc['iLocationid']);
+    $ok = $updLoc->execute();
+    $updLoc->close();
+    if ($ok) {
+        $upd = $link->prepare("UPDATE tblproject_tasks SET sReport = ?, sStatus = 'Done' WHERE id = ?");
+        $upd->bind_param('si', $report, $taskId);
+        $ok = $upd->execute();
+        $upd->close();
+    }
+    jsonOut($ok
+        ? ['status' => 'success', 'message' => 'Task completed and report submitted']
+        : ['status' => 'error', 'message' => 'Could not complete task']);
 }
 
 if ($action === 'add_project_task') {
