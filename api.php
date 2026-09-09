@@ -5215,6 +5215,160 @@ if ($method == 'POST' && isset($inputData['action']) && $inputData['action'] ===
     sendResponse('success', 'Tasks fetched successfully', $tasks);
 }
 
+// ---- Mobile App: Quotation Requests (token-authenticated) ----
+
+// A user (mobile app or web) asking that a quotation be prepared for a
+// project/lead — distinct from actually creating one (saveQuotation).
+function mobileEnsureQuotationRequestsTable(mysqli $link): void {
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    mysqli_query($link, "CREATE TABLE IF NOT EXISTS tblquotation_requests (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      lead_id INT NOT NULL,
+      iRequestedBy INT NOT NULL,
+      sNotes TEXT NULL,
+      sStatus VARCHAR(20) NOT NULL DEFAULT 'Pending',
+      iQuotationId INT NULL,
+      dCreatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      dUpdatedAt DATETIME NULL ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_lead (lead_id),
+      INDEX idx_status (sStatus),
+      INDEX idx_requested_by (iRequestedBy)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $done = true;
+}
+
+// Submit a request for quotation on a lead the user owns or is assigned to.
+if ($method == 'POST' && isset($inputData['action']) && $inputData['action'] === 'request_quotation') {
+    $userId = resolveAuthUserId($link, $inputData);
+    if ($userId <= 0) {
+        sendResponse('error', 'Unauthorized');
+    }
+    mobileEnsureQuotationRequestsTable($link);
+
+    $leadId = (int)($inputData['lead_id'] ?? 0);
+    $notes = trim((string)($inputData['notes'] ?? ''));
+    if ($leadId <= 0) {
+        sendResponse('error', 'Project/lead is required');
+    }
+
+    $chk = $link->prepare("SELECT iLead_id, sCompany_name, sLead_name, sAssigned_to, sLead_owner FROM tblleads WHERE iLead_id = ? LIMIT 1");
+    $chk->bind_param('i', $leadId);
+    $chk->execute();
+    $lead = $chk->get_result()->fetch_assoc();
+    $chk->close();
+    if (!$lead) {
+        sendResponse('error', 'Project not found');
+    }
+
+    $isAdmin = (isset($_SESSION['userRole']) && $_SESSION['userRole'] === 'Admin');
+    $assignedIds = mobileNormalizeAssignedIds($lead['sAssigned_to'] ?? '');
+    $owner = (int)($lead['sLead_owner'] ?? 0);
+    if (!$isAdmin && !in_array($userId, $assignedIds, true) && $owner !== $userId) {
+        sendResponse('error', 'You are not assigned to this project');
+    }
+
+    $stmt = $link->prepare("INSERT INTO tblquotation_requests (lead_id, iRequestedBy, sNotes) VALUES (?, ?, ?)");
+    $stmt->bind_param('iis', $leadId, $userId, $notes);
+    if (!$stmt->execute()) {
+        sendResponse('error', 'Could not save request: ' . $stmt->error);
+    }
+    $requestId = (int)$stmt->insert_id;
+    $stmt->close();
+
+    // Best-effort notification to the project owner/team; tblproject_notifications
+    // is created lazily by project-api.php, so silently skip if it isn't there yet.
+    $company = $lead['sCompany_name'] ?: $lead['sLead_name'];
+    $notifyIds = array_diff(array_unique(array_merge($assignedIds, [$owner])), [$userId]);
+    foreach ($notifyIds as $notifyId) {
+        if ($notifyId <= 0) {
+            continue;
+        }
+        $notifyStmt = @mysqli_prepare($link, "INSERT INTO tblproject_notifications (iUserid, lead_id, sType, sMessage, iCreatedBy) VALUES (?, ?, 'quotation_requested', ?, ?)");
+        if ($notifyStmt) {
+            $msg = 'Quotation requested for ' . $company;
+            mysqli_stmt_bind_param($notifyStmt, 'iisi', $notifyId, $leadId, $msg, $userId);
+            mysqli_stmt_execute($notifyStmt);
+            mysqli_stmt_close($notifyStmt);
+        }
+    }
+
+    sendResponse('success', 'Quotation request submitted', ['id' => $requestId]);
+}
+
+// List quotation requests: Finance/Admin (web session) sees every request;
+// everyone else sees only the ones they submitted, to track status.
+if ($method == 'POST' && isset($inputData['action']) && $inputData['action'] === 'list_quotation_requests') {
+    $userId = resolveAuthUserId($link, $inputData);
+    if ($userId <= 0) {
+        sendResponse('error', 'Unauthorized');
+    }
+    mobileEnsureQuotationRequestsTable($link);
+    $canManage = crmCanManageQuotation($link);
+
+    $sql = "SELECT r.*, l.sCompany_name, l.sLead_name, u.sName AS requested_by_name
+            FROM tblquotation_requests r
+            LEFT JOIN tblleads l ON l.iLead_id = r.lead_id
+            LEFT JOIN tbluser u ON u.iUserid = r.iRequestedBy";
+    if (!$canManage) {
+        $sql .= " WHERE r.iRequestedBy = ?";
+    }
+    $sql .= " ORDER BY FIELD(r.sStatus, 'Pending', 'Fulfilled', 'Rejected'), r.id DESC";
+
+    $stmt = $link->prepare($sql);
+    if ($canManage) {
+        $stmt->execute();
+    } else {
+        $stmt->bind_param('i', $userId);
+        $stmt->execute();
+    }
+    $result = $stmt->get_result();
+    $requests = [];
+    while ($row = $result->fetch_assoc()) {
+        $requests[] = [
+            'id' => (int)$row['id'],
+            'lead_id' => (int)$row['lead_id'],
+            'project_name' => $row['sCompany_name'] ?: $row['sLead_name'],
+            'notes' => $row['sNotes'],
+            'status' => $row['sStatus'],
+            'quotation_id' => $row['iQuotationId'] !== null ? (int)$row['iQuotationId'] : null,
+            'requested_by' => (int)$row['iRequestedBy'],
+            'requested_by_name' => $row['requested_by_name'],
+            'created_at' => $row['dCreatedAt'],
+        ];
+    }
+    $stmt->close();
+    sendResponse('success', 'Requests fetched successfully', $requests);
+}
+
+// Finance/Admin (web session) marks a request Fulfilled/Rejected, optionally
+// linking the quotation created for it.
+if ($method == 'POST' && isset($inputData['action']) && $inputData['action'] === 'update_quotation_request_status') {
+    $userId = resolveAuthUserId($link, $inputData);
+    if ($userId <= 0) {
+        sendResponse('error', 'Unauthorized');
+    }
+    if (!crmCanManageQuotation($link)) {
+        sendResponse('error', 'Access denied. Quotation management requires Finance access.');
+    }
+    mobileEnsureQuotationRequestsTable($link);
+
+    $requestId = (int)($inputData['id'] ?? 0);
+    $status = trim((string)($inputData['status'] ?? ''));
+    $quotationId = !empty($inputData['quotation_id']) ? (int)$inputData['quotation_id'] : null;
+    if ($requestId <= 0 || !in_array($status, ['Pending', 'Fulfilled', 'Rejected'], true)) {
+        sendResponse('error', 'Invalid request');
+    }
+
+    $stmt = $link->prepare("UPDATE tblquotation_requests SET sStatus = ?, iQuotationId = ? WHERE id = ?");
+    $stmt->bind_param('sii', $status, $quotationId, $requestId);
+    $ok = $stmt->execute();
+    $stmt->close();
+    sendResponse($ok ? 'success' : 'error', $ok ? 'Request updated' : 'Update failed');
+}
+
 // ---- Sales Management: Client Payments ----
 function paymentComputeStatus($amount, $received)
 {

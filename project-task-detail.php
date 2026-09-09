@@ -80,6 +80,15 @@ if ($taskId <= 0) {
             white-space: pre-wrap;
             line-height: 1.5;
         }
+        .pm-photo-thumb {
+            width: 220px;
+            height: 220px;
+            max-width: 100%;
+            object-fit: cover;
+            border-radius: 8px;
+            border: 1px solid var(--crm-border, #e5e7eb);
+            cursor: pointer;
+        }
     </style>
 </head>
 <?php include 'layouts/body.php'; ?>
@@ -145,6 +154,7 @@ if ($taskId <= 0) {
                 <div class="pm-detail-card">
                     <h6><i class="bx bx-file me-1"></i> Visit / Meeting Report</h6>
                     <div id="reportDisplay" class="pm-report-text text-muted">No report submitted yet.</div>
+                    <div id="reportPhotos" class="mt-3 d-flex flex-wrap gap-2"></div>
                 </div>
 
             </div>
@@ -272,6 +282,13 @@ function loadTask() {
             document.getElementById('reportDisplay').textContent = 'No report submitted yet.';
             document.getElementById('reportDisplay').classList.add('text-muted');
         }
+
+        var photosHtml = '';
+        (t.visit_photos || []).forEach(function (pid) {
+            photosHtml += '<a href="view-project-visit-photo.php?id=' + pid + '" target="_blank">' +
+                '<img class="pm-photo-thumb" src="view-project-visit-photo.php?id=' + pid + '" alt="Visit photo"></a>';
+        });
+        document.getElementById('reportPhotos').innerHTML = photosHtml;
     });
 }
 

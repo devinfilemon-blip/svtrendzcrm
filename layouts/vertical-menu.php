@@ -374,6 +374,7 @@ if (isset($_SESSION["userRole"]) && $_SESSION["userRole"] !== "Admin") {
     </a>
     <ul class="sub-menu" aria-expanded="false">
         <li><a href="quotation-list.php">List Tax Invoice</a></li>
+        <li><a href="quotation-requests.php">Quotation Requests</a></li>
         <li><a href="upload-pdf.php">Upload PDF</a></li>
     </ul>
 </li>

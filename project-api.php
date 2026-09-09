@@ -227,7 +227,7 @@ function getEmployeeDayLocationRange($link, $userId, $date)
 // used as the task's "visit/meeting report".
 function getMatchingVisitReport($link, $leadId, $userId, $date)
 {
-    $stmt = $link->prepare("SELECT sVisitType, sVisitDate, sLocation, sNotes
+    $stmt = $link->prepare("SELECT id, sVisitType, sVisitDate, sLocation, sNotes
         FROM tblproject_visits WHERE lead_id = ? AND iUserid = ? AND sVisitDate = ?
         ORDER BY id DESC LIMIT 1");
     $stmt->bind_param('iis', $leadId, $userId, $date);
@@ -235,6 +235,22 @@ function getMatchingVisitReport($link, $leadId, $userId, $date)
     $row = $stmt->get_result()->fetch_assoc();
     $stmt->close();
     return $row ?: null;
+}
+
+// Photo ids attached to a Visit/Meeting log entry (tblproject_visit_photos),
+// served individually via view-project-visit-photo.php?id=<id>.
+function getVisitPhotoIds($link, $visitId)
+{
+    $stmt = $link->prepare("SELECT id FROM tblproject_visit_photos WHERE visit_id = ? ORDER BY id");
+    $stmt->bind_param('i', $visitId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $ids = [];
+    while ($row = $result->fetch_assoc()) {
+        $ids[] = (int)$row['id'];
+    }
+    $stmt->close();
+    return $ids;
 }
 
 // The date used to match tbllocation pings / visit-log entries to a task.
@@ -895,6 +911,7 @@ if ($action === 'get_project_task') {
             'report' => $visit['sNotes'] ?? null,
             'visit_type' => $visit['sVisitType'] ?? null,
             'visit_location' => $visit['sLocation'] ?? null,
+            'visit_photos' => $visit ? getVisitPhotoIds($link, (int)$visit['id']) : [],
             'distance_km' => $distanceKm !== null ? round($distanceKm, 2) : null,
             'petrol_cost' => $petrolCost,
             'petrol_rate_per_km' => PROJECT_TASK_PETROL_RATE_PER_KM,

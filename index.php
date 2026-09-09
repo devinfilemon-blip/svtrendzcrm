@@ -108,6 +108,20 @@
                             </div>
                         </a>
                     </div>
+                    <?php if (isset($_SESSION['userRole']) && $_SESSION['userRole'] === 'Admin') : ?>
+                    <div class="col-md-3 col-sm-6">
+                        <a href="quotation-requests.php" class="crm-dash-stat-link">
+                            <div class="crm-stat-v3 crm-stat-v3--reengage">
+                                <div class="crm-stat-v3-icon"><i class="bx bx-file-find"></i></div>
+                                <div>
+                                    <p class="crm-stat-v3-num" id="quotationRequestCount">0</p>
+                                    <h6>Quotation Requests</h6>
+                                    <span class="crm-stat-v3-hint">Pending requests to review →</span>
+                                </div>
+                            </div>
+                        </a>
+                    </div>
+                    <?php endif; ?>
                 </div>
 
                 <!-- Today's Re-engage -->
@@ -316,6 +330,20 @@ $(function () {
             animateCount('#reengageCount', res.reengage || 0);
         }
     });
+
+    if (document.getElementById('quotationRequestCount')) {
+        fetch('api.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'list_quotation_requests' })
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+            if (res.status !== 'success') return;
+            var pending = (res.data || []).filter(function (r) { return r.status === 'Pending'; }).length;
+            animateCount('#quotationRequestCount', pending);
+        });
+    }
 
     function escapeDashHtml(text) {
         if (text === null || text === undefined) return '';
